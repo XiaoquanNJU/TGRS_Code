@@ -1,0 +1,104 @@
+// Study area location
+var position = ee.Geometry.Point([115.93055119367318, 43.97649538354993]);
+
+// Set a 10km buffer
+var Buffer = position.buffer(10000); 
+
+// Study area extent 
+var StudyArea = Buffer;
+
+// Visualize the study area
+Map.centerObject(StudyArea, 10);
+Map.addLayer(StudyArea, {color: 'blue'}, 'Study Area');
+ 
+ 
+//-------------------------------------------------------------
+// Use SIAC for atmospheric correction on Landsat 8 TOA data
+
+// SIAC atmospheric correction algorithm
+var siac = require('users/marcyinfeng/utils:SIAC');
+
+// Set parameters(Time and cloudCover)
+var start_time = '2021-6-10'; // Start date of the imagery
+var end_time = '2021-6-11';  // End date of the imagery
+var cloudCover = 20; // Cloud cover threshold
+
+// Rename Landsat 8 TOA bands
+function bandRenameL8TOA(image) {
+  var coastal_aerosol = image.select(['B1']).rename('coastal_aerosol');
+  var blue = image.select(['B2']).rename('blue');
+  var green = image.select(['B3']).rename('green');
+  var red = image.select(['B4']).rename('red');
+  var nir = image.select(['B5']).rename('nir');
+  var swir1 = image.select(['B6']).rename('swir1');
+  var swir2 = image.select(['B7']).rename('swir2');
+  var new_image = blue.addBands([green, red, nir, swir1, swir2]);
+  return new_image;
+}
+
+// Select Landsat 8 TOA dataset and set parameters
+var L8SIAC_dataset = ee.ImageCollection("LANDSAT/LC08/C02/T1_TOA") // Landsat 8 TOA dataset
+    .filterDate(start_time, end_time)  // Image date filter
+    .filterBounds(StudyArea)  // Image region filter
+    .filter(ee.Filter.lt('CLOUD_COVER', cloudCover)) // Cloud cover filter
+    .map(siac.get_l8_sur) // Apply SIAC atmospheric correction
+    .map(bandRenameL8TOA); // Rename bands
+
+print(L8SIAC_dataset);
+
+// color band
+var palettes = require('users/gena/packages:palettes') 
+// Clip the image by study area
+var L8SIAC = L8SIAC_dataset.median().clip(StudyArea);
+
+// Indices
+var FSSI = L8SIAC.expression(
+  'FSSI = exp(-1*(abs((b2-b3)/(b2+b3))))/(1+abs((b5-b3)/(b5+b3)))',{
+    'b2': L8SIAC.select('blue'),
+    'b3': L8SIAC.select('green'),
+    'b5': L8SIAC.select('nir')
+  }).rename("FSSI");  
+
+var ECI = L8SIAC.select('nir').lte(0.1).multiply(FSSI).rename('ECI')
+var WRI = L8SIAC.select('nir').gt(0.1).multiply(FSSI).rename('WRI')
+
+var mNDWI = L8SIAC.expression(
+  'mNDWI = b3-b6',{
+    'b3': L8SIAC.select('green'),
+    'b6': L8SIAC.select('swir1')
+  }).rename("mNDWI");  
+
+var BCCSI = L8SIAC.expression(
+  'BCCSI = 100*(b2)*(b7)*(2*b2-b3-b4)/(2*b2+b3+b4)',{
+    'b2': L8SIAC.select('blue'),
+    'b3': L8SIAC.select('green'),
+    'b4': L8SIAC.select('red'),
+    'b7': L8SIAC.select('swir2')
+  }).rename("BCCSI"); 
+
+
+var Water = mNDWI.gte(0.0).rename('Water');
+var nonWater = mNDWI.lt(0.0);
+var brib = BCCSI.gte(0.5);
+var nonbrib = BCCSI.lt(0.5);
+var coal = ECI.gte(0.65);
+var cmwr = WRI.gte(0.65);
+var cms = FSSI.lt(0.65);
+
+var BRIB = nonWater.and(brib).rename('BRIB');
+var NonBRIB = nonWater.and(nonbrib);
+var Coal = NonBRIB.and(coal).rename('Coal');
+var CMWR = NonBRIB.and(cmwr).rename('CMWR');
+var CMS = NonBRIB.and(cms).rename('CMS');
+
+var Indices = Water.addBands(BRIB).addBands(Coal).addBands(CMWR).addBands(CMS)
+
+
+// Visualize Landsat 8 SIAC true color image
+Map.addLayer(L8SIAC, {min: 0.0, max: 0.3, bands: ['red', 'green', 'blue']}, 'L8SIAC_TrueColor');
+
+Map.addLayer(Water, { }, 'Water');
+Map.addLayer(BRIB, { }, 'BRIB');
+Map.addLayer(Coal, { }, 'Coal');
+Map.addLayer(CMWR, { }, 'CMWR');
+Map.addLayer(CMS, { }, 'CMS');
