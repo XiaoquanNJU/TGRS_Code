@@ -1,0 +1,81 @@
+// Study area location
+var position = ee.Geometry.Point([115.93055119367318, 43.97649538354993]);
+
+// Set a 10km buffer
+var Buffer = position.buffer(10000); 
+
+// Study area extent 
+var StudyArea = Buffer;
+
+// Visualize the study area
+Map.centerObject(StudyArea, 10);
+Map.addLayer(StudyArea, {color: 'blue'}, 'Study Area');
+ 
+
+//-------------------------------------------------------------
+// Use SIAC for atmospheric correction on Landsat 8 TOA data
+
+// SIAC atmospheric correction algorithm
+var siac = require('users/marcyinfeng/utils:SIAC');
+
+// Set parameters(Time and cloudCover)
+var start_time = '2021-6-10'; // Start date of the imagery
+var end_time = '2021-6-11';  // End date of the imagery
+var cloudCover = 20; // Cloud cover threshold
+
+// Rename Landsat 8 TOA bands
+function bandRenameL8TOA(image) {
+  var coastal_aerosol = image.select(['B1']).rename('coastal_aerosol');
+  var blue = image.select(['B2']).rename('blue');
+  var green = image.select(['B3']).rename('green');
+  var red = image.select(['B4']).rename('red');
+  var nir = image.select(['B5']).rename('nir');
+  var swir1 = image.select(['B6']).rename('swir1');
+  var swir2 = image.select(['B7']).rename('swir2');
+  var new_image = blue.addBands([green, red, nir, swir1, swir2]);
+  return new_image;
+}
+
+// Select Landsat 8 TOA dataset and set parameters
+var L8SIAC_dataset = ee.ImageCollection("LANDSAT/LC08/C02/T1_TOA") // Landsat 8 TOA dataset
+    .filterDate(start_time, end_time)  // Image date filter
+    .filterBounds(StudyArea)  // Image region filter
+    .filter(ee.Filter.lt('CLOUD_COVER', cloudCover)) // Cloud cover filter
+    .map(siac.get_l8_sur) // Apply SIAC atmospheric correction
+    .map(bandRenameL8TOA); // Rename bands
+
+print(L8SIAC_dataset);
+
+// color band
+var palettes = require('users/gena/packages:palettes') 
+// Clip the image by study area
+var L8SIAC = L8SIAC_dataset.median().clip(StudyArea);
+
+// NDVIB 
+var NDVIB =  L8SIAC.expression(
+  'NDVIB = (2*b5-b4-b2)/(2*b5+b4+b2)',{
+    'b5':  L8SIAC.select('nir'),
+    'b4':  L8SIAC.select('red'),
+    'b2':  L8SIAC.select('blue'),
+  }).rename("NDVIB");
+
+// SNIC
+var segmentation = function(img){
+  var seeds = ee.Algorithms.Image.Segmentation.seedGrid(5);
+  var snic = ee.Algorithms.Image.Segmentation.SNIC({
+    image: img.select(['NDVIB']),
+    size: 5,
+    compactness: 0.2, 
+    connectivity: 8,
+    neighborhoodSize: 256,
+    seeds: seeds
+  });
+  return img.addBands(snic).select(['NDVIB_mean']).rename(['NDVIB']); 
+};
+//
+
+var NDVIBsnic = segmentation(NDVIB)
+
+// Visualize Landsat 8 SIAC true color image
+Map.addLayer(L8SIAC, {min: 0.0, max: 0.3, bands: ['red', 'green', 'blue']}, 'L8SIAC_TrueColor');
+Map.addLayer(NDVIBsnic,{palette:palettes.colorbrewer.RdYlGn[10].reverse()},"NDVIB_snic",false);
